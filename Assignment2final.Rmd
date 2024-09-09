@@ -1,0 +1,389 @@
+---
+title: "Assignment 2"
+author: "Martin Lindqvist"
+date: "2024-02-25"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r, include=FALSE}
+# Load packages
+library(MASS)
+library(leaps)
+library(glmnet)
+library(pls)
+```
+## Introduction
+In this assignment data will be generated from a known distribution to explore and compare the efficacy of various regression and feature selection methods. The methods that will be compared are: Linear Regression utilising all available features, Linear Regression using forward selection and the Bayesian Information Criterion (BIC) for feature selection, Lasso Regression using cross-validation for feature selection, Principal Component Regression (PCR) using cross-validation for component selection, and PCR with two components.
+
+
+
+### Introduction to Simulated Dataset
+A dataset has been constructed where certain features exhibit correlation, and there exists a linear relationship between a subset of the features and the response variable. The data was created in the following steps:
+
+#### Parameter Definition
+
+The fundamental parameters for the data generating process are defined as:
+
+- $n_{\text{obs}} = 100$: The total number of observations in each simulated dataset.
+- $n_{x} = 40$: The number of features included.
+- $\rho = 0.8$: The covariance assigned to a specific subset of features.
+
+#### Covariance Matrix and Feature Generation
+
+A covariance matrix, $\mathbf{C}$, of dimensions $n_{x} \times n_{x}$, is created to control the variance and covariance among the features:
+
+All values in the matrix are initially set to zero, implying no correlation. Features 10 to 30 ($\mathbf{C}_{10:30, 10:30}$), are set to $\rho$, inducing a covariance of 0.8 among them.
+
+The diagonal elements of $\mathbf{C}$ are assigned a value of 1, giving each feature a variance of 1.
+
+Using a multivariate normal distribution with the variance/covariance structure defined by $\mathbf{C}$, a new matrix $X$ is generated, containing $n_{\text{obs}}$ observations of $n_{x}$ normally distributed features.
+
+#### Response Variable Construction
+
+The response variable $y$, is generated through a summation of the first 20 features of $X$ for each row, plus an error term $\varepsilon$. Where $\varepsilon \sim N(0,1)$.
+
+
+#### Data Compilation
+
+The aforementioned procedure is repeated 500 times.This yields 500 distinct datasets, each comprising 100 observations with 40 features, wherein features 10 through 30 are correlated, while feature 1 through 20 has a linear relationship with the response variable, as well as stochastic noise.
+
+
+```{r}
+# Generate data
+
+# Set seed
+set.seed(72456)
+
+# Set parameters for sampling
+n_obs <- 100 # Number of observations
+n_x <- 40 # Number of features
+rho <- 0.8 # Covariance
+
+# Create a list to store the simulated data frames
+sim_data <- list()
+fx <- list()
+
+for(i in 1:500){
+
+# Create matrix with variances = 1 and covariances = 0 between
+# some of the variables and covariances = rho between some of the variables
+C <- matrix(0, nrow = n_x, ncol = n_x)
+C[10:30, 10:30] <- rho
+diag(C) <- 1
+
+# Create a matrix with n_obs observations of n_x normaly distributed
+# features with expected value = 0, and variance = 1.
+X <- mvrnorm(n_obs, rep(0, n_x), C)
+
+# Create a vector of iid error terms N(0,1)
+Eps <- rnorm(n_obs)
+
+# Create a vector with observations of the response that has been
+# generated using linear regression
+y <- rowSums(X[,1:20]) + Eps
+
+
+# Save the data
+sim_data[[i]] <- data.frame(X, y)
+# Save f(x)
+fx[[i]] <- rowSums(X[,1:20])
+
+
+}
+```
+
+
+```{r}
+# Create a predict function
+predict.regsubsets <- function(object, newdata, id, ...) {
+  form <- as.formula(object$call[[2]])
+  mat <- model.matrix(form, newdata)
+  coefi <- coef(object, id = id)
+  mat[, names(coefi)] %*% coefi
+}
+```
+
+
+```{r}
+# OLS all variables
+
+# Place holder for the average MSE of each iteration
+ols_mse <- numeric(500)
+
+
+for(i in 1:500){
+    # Fit the model on the training set for this fold
+    lmfit <- lm(y ~ ., data = sim_data[[i]])
+    
+    # Predict and calculate errors using the model
+    lmpred <- predict(lmfit, newdata = sim_data[[i]])
+
+    # Save the MSE
+    ols_mse[i] <- mean((fx[[i]] - lmpred)^2) + 1
+}
+
+mean_ols_mse <- mean(ols_mse)
+```
+
+
+
+```{r}
+# Linear regression forward selection
+
+# Place holder for the MSE of each iteration
+fwd_mse <- numeric(500)
+
+# Create a numeric to store the count of each variable
+variable_selection_count_fwd <- numeric(40)
+
+# Give each variable the correct name
+names(variable_selection_count_fwd) <- names(sim_data[[1]])[names(sim_data[[1]]) != "y"]
+
+for(i in 1:500) {
+
+    # Fit the model on the training set for this fold
+    fwd_fit <- regsubsets(y ~ ., data = sim_data[[i]], nvmax = 40, method = "forward")
+    reg_summary <- summary(fwd_fit)
+    
+    # Find the model size with the lowest BIC
+    best_fit <- which.min(reg_summary$bic)
+    
+    # Store the selected variables in as logical
+    selected_vars_fwd <- as.logical(reg_summary$which[best_fit, -1])
+    
+    # Save the counts of variable inclusion
+    variable_selection_count_fwd <- variable_selection_count_fwd + selected_vars_fwd
+    
+    # Predict and calculate errors using the model with the lowest BIC
+    fwd_pred <- predict.regsubsets(fwd_fit, sim_data[[i]], id = best_fit)
+    
+    # Store the MSE
+    fwd_mse[i] <- mean((fx[[i]] - fwd_pred)^2) + 1
+}
+
+mean_fwd_mse <- mean(fwd_mse)
+
+```
+
+```{r}
+# Lasso
+
+# Place holder for the MSE of each iteration
+lasso_mse <- numeric(500)
+
+# Create a numeric to store variable selection count
+variable_selection_count_lasso <- numeric(40)
+
+# Set the correct names for the variables
+names(variable_selection_count_lasso) <- names(sim_data[[1]])[names(sim_data[[1]]) != "y"]
+
+for(i in 1:500){
+
+  # Create x and y matrices for glmnet
+  lasso_x <- as.matrix(sim_data[[i]][, 1:40])
+  lasso_y <- as.matrix(sim_data[[i]][, 41])
+
+  # Fit the Lasso model with cross-validation
+  cv_lasso <- cv.glmnet(lasso_x, lasso_y, alpha = 1)
+  
+  # Get the lambda value with the lowest cross-validation error
+  min_lambda <- cv_lasso$lambda.min
+  
+  # Create a logical to check if each variable is included or not
+  selected_vars_lasso <- as.logical(coef(cv_lasso, s = "lambda.min"))[-1]
+  # Save the counts of the included variables
+  variable_selection_count_lasso <- variable_selection_count_lasso + selected_vars_lasso
+  
+  # Predict
+  lasso_predictions <- predict(cv_lasso, newx = lasso_x, s = min_lambda)
+  
+  # Calculate and store the MSE
+  lasso_mse[i] <- mean((fx[[i]] - lasso_predictions)^2) + 1
+
+}
+
+mean_lasso_mse <- mean(lasso_mse)
+```
+
+```{r}
+# Set seed
+set.seed(94512)
+
+# PCR CV-folds to select number of components
+
+# Create numeric to store MSE
+mse_pcr <- numeric(500)
+
+# Create a numeric to store the number of components
+num_comp <- numeric(500)
+
+for(i in 1:500){
+  # Fit the PCR model with cross-validation
+  pcr_fit <- pcr(y ~ ., data = sim_data[[i]], 
+                 scale = TRUE, validation = "CV")
+  
+  # Find the optimal number of components
+  cverr <- RMSEP(pcr_fit)$val[1,,]
+  imin <- which.min(cverr) - 1
+  
+  # Save the number of components
+  num_comp[i] <- imin
+  
+  # Predict
+  pcr_predictions <- predict(pcr_fit, newdata = sim_data[[i]], ncomp = imin)
+
+  # Save the MSE
+  mse_pcr[i] <- mean((fx[[i]] - pcr_predictions)^2) + 1
+}
+
+mean_pcr_mse <- mean(mse_pcr)
+mean_num_comp <- mean(num_comp)
+
+```
+
+```{r}
+# Set seed
+set.seed(94512)
+
+# PCR two components
+
+# Create numeric to store MSE
+mse_pcr2 <- numeric(500)
+
+for(i in 1:500){
+  # Fit the PCR model with cross-validation
+  pcr_fit2 <- pcr(y ~ ., data = sim_data[[i]], scale = TRUE)
+
+  # Predict
+  pcr_predictions2 <- predict(pcr_fit, newdata = sim_data[[i]], ncomp = 2)
+
+  # Save the MSE
+  mse_pcr2[i] <- mean((fx[[i]] - pcr_predictions2)^2) + 1
+}
+
+mean_pcr_mse_2 <- mean(mse_pcr2)
+```
+
+### Prediction MSE between the models
+
+The predictive performance of the different models is assessed using the Prediction Mean Squared Error (MSE), which is a measure of a model's accuracy in forecasting on unseen data. The Prediction MSE is calculated as follows:
+
+Prediction MSE = $\text{Var}(\varepsilon) + \mathbb{E}\left[\left(f(x) - \hat{f}(x)\right)^2\right]$.
+
+Where:
+
+- $\text{Var}(\varepsilon)$ represents the variance of the error term, which is known to be 1.
+
+- $\mathbb{E}\left[\left(f(x) - \hat{f}(x)\right)^2\right]$ denotes the expected value of the squared differences between the true function $f(x)$ and its estimates $\hat{f}(x)$.
+
+In the context of the data:
+
+- $f(x_i) = \sum_{j=1}^{20} X_{ij}$ is the sum of the first 20 features for each observation $i$.
+  - $X_{ij}$ denotes the value of the $j$:th feature in the $i$:th row of the matrix $X$.
+- $\hat{f}(x_i)$ are the observed predictions on the training data.
+
+
+By measuring the Prediction MSE, the aim is to evaluate the effectiveness and accuracy of the various models in their ability to discern the true relationships within the data.
+
+Below are the Prediction MSE for the evaluated models:
+```{r}
+# Print Prediction MSE for all the models
+print(paste("1. OLS (all features):", round(mean_ols_mse, 4)))
+print(paste("2. LR (forward selection/BIC):", round(mean_fwd_mse, 4)))
+print(paste("3. Lasso:", round(mean_lasso_mse, 4)))
+print(paste("4. PCR (CV-folds for num components):", round(mean_pcr_mse, 4)))
+print(paste("5. PCR (2 components):", round(mean_pcr_mse_2, 4)))
+```
+
+
+#### 1. Ordinary Least Squares (OLS) with all available features
+The OLS model does not perform any feature selection or dimensionality reduction. Because of this we expect the model to overfit to variables that doesn't directly affect the response in the population (21-40). But despite this the model performs relatively well with a Prediction MSE of 1.405. This is because the linear relationship between variable 1 to 20 and the response is strong enough to be captured despite the inclusion of the other variables comprising stochastic noise.
+
+
+#### 2. Linear Regression (LR) using Forward Selection and BIC
+
+Out of all the models Linear Regression using forward selection and BIC to reduce the feature set to the most important features had the lowest Prediction MSE of 1.2952. This performance can likely be attributed to the methods ability to include the correct variables (1-20) at a very high rate, as well as including the incorrect variables (21-40) at a low rate as seen in **Plot 1**. This constructs models that often does a decent job of representing the underlying relationship within the data.
+
+
+```{r}
+# Forward selection plot
+
+# Define colours for the different features
+colours <- c(rep("blue", 20), rep("red", 20))
+
+# Plot the feature proportions
+plot(variable_selection_count_fwd / 500, # /500 to get proportion
+     main = "Linear Regression (forward selection)",
+     ylim = c(0, 1),
+     pch = 20,
+     col = colours,
+     cex = 2,
+     ylab = "Proportions of inclusion",
+     xlab = "Variables",
+     sub = "Plot 1")
+
+# Text underneath the header
+mtext("Inclusion proportions for the different variables")
+
+# Add legend
+legend("topright",
+       legend = c("Correct variables", "Incorrect variables"),
+       col = c("blue", "red"),
+       pch = 20,
+       cex = 1)
+```
+
+#### 3. Lasso Regression
+
+Lasso Regression using cross-validation to select the $\lambda$ with the lowest cross-validation MSE has the second lowest Prediction MSE of 1.3227. It shows slightly worse performance than LR with forward selection, but better than OLS with all available features and PCR. This decrease in performance compared to LR is likely due to its inability to completely exclude the incorrect variables (21-40) as seen in **Plot 2**. We can see that features 31-40 which does not have a correlation to any other features are included at a higher rate than features 21-30 which are correlated to a subset of the correct variables.
+
+
+
+```{r}
+# Lasso plot
+
+# Plot the feature proportions
+plot(variable_selection_count_lasso / 500, # /500 to get proportion
+     main = "Lasso",
+     ylim = c(0, 1),
+     pch = 20,
+     col = colours,
+     cex = 2,
+     ylab = "Proportions of inclusion",
+     xlab = "Variables",
+     sub = "Plot 2")
+
+# Text underneath the header
+mtext("Inclusion proportions for the different variables")
+
+# Add legend
+legend("topright",
+       legend = c("Correct variables", "Incorrect variables"),
+       col = c("blue", "red"),
+       pch = 20,
+       cex = 1)
+```
+
+#### 4. Principal Component Regression (PCR) using Cross-Validation
+PCR using Cross-Validation to select the number of components to include underperformed compared to OLS (all features), LR (forward selection) and Lasso, with a Prediction MSE of 1.4261. I had expected this model to perform better than it did. It seems like it is not able to detect the the underlying relationship in the data while simultaneously excluding the signals from the stochastic noise with the same accuracy as the other models. It does not reduce the dimensionality by much since the average number of components are 36.486 as seen below. Even though the underlying data only contains 20 variables that has an direct impact on the response.
+
+```{r}
+print(paste("Average number of components in PCR:",mean_num_comp))
+```
+
+
+
+#### 5. Principal Component Regression (PCR) with Two Components
+PCR with only two components performs much worse than all the other models with a Prediction MSE of 10.8239. This large difference can be explained by the dimensionality being reduced by such a drastic amount that a lot of the information is lost.
+
+
+
+### Discussion
+In this assignment we examined the performance of various regression and feature selection methods. A key parameter was $\rho$ which was set to 0.8, representing the covariance between a subset of the features. Varying $\rho$ could provide insights into the different models abilities to adapt under different data correlations. It would be especially interesting to see if Lasso Regression would be able to exclude more of the incorrect variables if $\rho$ was set to a lower value. The performance of PCR is also likely to differ when $\rho$ is changed. PCR often performs well in environments where the variables has high covariance since it creates components that are uncorrelated to each other. It would also be interesting to see how the performance of the various models would change if the subset of features that have a covariance would be changed to include more or fewer features.
